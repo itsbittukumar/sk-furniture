@@ -309,3 +309,17 @@ kubectl -n sk-furniture rollout undo deployment/frontend
 Create an IAM role trusted by GitHub's OIDC provider and reference its ARN with
 `role-to-assume` in `aws-actions/configure-aws-credentials` instead of the key/secret
 pair — AWS's guide: https://docs.github.com/en/actions/deployment/security-hardening-your-deployments/configuring-openid-connect-in-amazon-web-services
+
+---
+
+## Full infrastructure setup (prerequisites, eksctl, Terraform, Jenkins)
+
+For a from-scratch AWS account → running cluster → automated Jenkins deploys,
+see **[infra/README.md](infra/README.md)**. It covers, in order:
+
+1. `infra/scripts/00-install-prerequisites.sh` — installs AWS CLI, kubectl, eksctl, Helm, Docker
+2. Creating the cluster — either `infra/scripts/01-create-eks-cluster.sh` (eksctl) or
+   `infra/terraform/` (Terraform, using the terraform-aws-modules VPC + EKS modules)
+3. `infra/scripts/02-install-cluster-addons.sh` — ingress-nginx, metrics-server, storage class, cluster-autoscaler
+4. `infra/scripts/03-deploy-app.sh` — first manual deploy of SK Furniture itself
+5. The root `Jenkinsfile` — automated build/push/deploy pipeline for every push after that

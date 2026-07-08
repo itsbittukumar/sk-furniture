@@ -1,0 +1,145 @@
+// SK Furniture - Infrastructure pipeline (Terraform).
+// Provisions/updates/destroys the EKS cluster + VPC via Terraform, then
+// (on apply) points kubectl at it and installs the cluster add-ons.
+//
+// This is a SEPARATE Jenkins job from the app deploy Jenkinsfile at the repo
+// root - infra changes rarely, app deploys happen on every push. Run this job
+// first (ACTION=apply) to create the cluster, then use the root Jenkinsfile
+// for day-to-day app deploys.
+//
+// One-time setup before the first run:
+//   1. bash infra/scripts/05-bootstrap-terraform-backend.sh   (creates the S3
+//      state bucket + DynamoDB lock table - update TF_STATE_BUCKET below with
+//      the bucket name it prints)
+//   2. Jenkins agent needs: terraform, aws cli, kubectl, helm
+//      (infra/scripts/00-install-prerequisites.sh installs all of these)
+//   3. Jenkins agent's AWS identity (IAM instance role, or credentials -
+//      see root Jenkinsfile comments) needs permissions to create VPCs, EKS
+//      clusters, IAM roles, EC2 instances, etc. (broad infra-admin access).
+
+pipeline {
+    agent any
+
+    parameters {
+        choice(name: 'ACTION', choices: ['plan', 'apply', 'destroy'],
+            description: 'plan = preview only, apply = create/update the cluster, destroy = tear it down')
+    }
+
+    environment {
+        AWS_REGION       = 'ap-south-1'
+        CLUSTER_NAME     = 'sk-furniture-cluster'
+        // Fill in with the bucket name printed by 05-bootstrap-terraform-backend.sh
+        TF_STATE_BUCKET  = 'sk-furniture-tfstate-REPLACE_WITH_YOUR_ACCOUNT_ID'
+        TF_LOCK_TABLE    = 'sk-furniture-tf-locks'
+        TF_VAR_region       = "${AWS_REGION}"
+        TF_VAR_cluster_name = "${CLUSTER_NAME}"
+    }
+
+    options {
+        timestamps()
+        disableConcurrentBuilds()
+    }
+
+    stages {
+
+        stage('Checkout') {
+            steps {
+                checkout scm
+            }
+        }
+
+        stage('Terraform init') {
+            steps {
+                dir('infra/terraform') {
+                    sh '''
+                        terraform init -input=false \
+                            -backend-config="bucket=$TF_STATE_BUCKET" \
+                            -backend-config="key=sk-furniture/eks/terraform.tfstate" \
+                            -backend-config="region=$AWS_REGION" \
+                            -backend-config="dynamodb_table=$TF_LOCK_TABLE" \
+                            -backend-config="encrypt=true"
+                    '''
+                }
+            }
+        }
+
+        stage('Terraform validate') {
+            steps {
+                dir('infra/terraform') {
+                    sh 'terraform validate'
+                }
+            }
+        }
+
+        stage('Terraform plan') {
+            steps {
+                dir('infra/terraform') {
+                    sh 'terraform plan -input=false -out=tfplan'
+                }
+            }
+        }
+
+        stage('Approval') {
+            when { expression { params.ACTION != 'plan' } }
+            steps {
+                script {
+                    input message: "Terraform will run '${params.ACTION}' on cluster '${env.CLUSTER_NAME}'. Continue?"
+                }
+            }
+        }
+
+        stage('Terraform apply') {
+            when { expression { params.ACTION == 'apply' } }
+            steps {
+                dir('infra/terraform') {
+                    sh 'terraform apply -input=false -auto-approve tfplan'
+                }
+            }
+        }
+
+        stage('Terraform destroy') {
+            when { expression { params.ACTION == 'destroy' } }
+            steps {
+                dir('infra/terraform') {
+                    sh '''
+                        terraform destroy -input=false -auto-approve \
+                            -var="region=$AWS_REGION" -var="cluster_name=$CLUSTER_NAME"
+                    '''
+                }
+            }
+        }
+
+        stage('Configure kubectl') {
+            when { expression { params.ACTION == 'apply' } }
+            steps {
+                sh 'aws eks update-kubeconfig --name $CLUSTER_NAME --region $AWS_REGION'
+                sh 'kubectl get nodes -o wide'
+            }
+        }
+
+        stage('Install cluster add-ons') {
+            when { expression { params.ACTION == 'apply' } }
+            steps {
+                sh 'bash ../scripts/02-install-cluster-addons.sh'
+            }
+        }
+    }
+
+    post {
+        success {
+            script {
+                if (params.ACTION == 'apply') {
+                    echo "Cluster '${env.CLUSTER_NAME}' is ready. Next: run infra/scripts/03-deploy-app.sh once " +
+                         "(or trigger it as a stage in the app-deploy Jenkinsfile) to deploy SK Furniture onto it."
+                } else if (params.ACTION == 'destroy') {
+                    echo "Cluster '${env.CLUSTER_NAME}' and its infrastructure have been destroyed."
+                } else {
+                    echo "Plan complete - review the output above. Re-run with ACTION=apply to create/update the cluster."
+                }
+            }
+        }
+        failure {
+            echo "Terraform pipeline failed - check the stage logs above before re-running."
+        }
+    }
+}

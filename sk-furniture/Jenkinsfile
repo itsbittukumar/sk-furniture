@@ -1,0 +1,148 @@
+// SK Furniture - Jenkins pipeline
+// Builds both Docker images, pushes to Amazon ECR, and rolls the new images
+// out to an already-running EKS cluster (created via eksctl or Terraform -
+// see infra/). Run `infra/scripts/03-deploy-app.sh` once by hand first so the
+// namespace, secret, MongoDB, and initial Deployments already exist; this
+// pipeline then just updates the image on every build.
+//
+// Jenkins agent requirements: docker, aws cli v2, kubectl (run
+// infra/scripts/00-install-prerequisites.sh on the agent host once).
+//
+// Required Jenkins credentials (Manage Jenkins > Credentials):
+//   aws-jenkins-creds   - "AWS Credentials" kind, with ECR push + EKS access
+//                         (skip this and the withCredentials blocks below if
+//                         the Jenkins agent runs on an EC2 instance / node
+//                         with an IAM instance role that already has that
+//                         access - then AWS calls just work with no creds).
+
+pipeline {
+    agent any
+
+    parameters {
+        booleanParam(name: 'RUN_SEED', defaultValue: false,
+            description: 'Run the one-time database seed job after deploying (first deploy only)')
+    }
+
+    environment {
+        AWS_REGION          = 'ap-south-1'
+        CLUSTER_NAME        = 'sk-furniture-cluster'
+        NAMESPACE           = 'sk-furniture'
+        ECR_BACKEND_REPO    = 'sk-furniture-backend'
+        ECR_FRONTEND_REPO   = 'sk-furniture-frontend'
+    }
+
+    options {
+        timestamps()
+        disableConcurrentBuilds()
+    }
+
+    stages {
+
+        stage('Checkout') {
+            steps {
+                checkout scm
+            }
+        }
+
+        stage('Set build variables') {
+            steps {
+                script {
+                    env.IMAGE_TAG = sh(script: 'git rev-parse --short HEAD', returnStdout: true).trim()
+                    env.ACCOUNT_ID = sh(script: 'aws sts get-caller-identity --query Account --output text', returnStdout: true).trim()
+                    env.REGISTRY = "${env.ACCOUNT_ID}.dkr.ecr.${env.AWS_REGION}.amazonaws.com"
+                    echo "Deploying tag ${env.IMAGE_TAG} to registry ${env.REGISTRY}"
+                }
+            }
+        }
+
+        stage('Ensure ECR repositories exist') {
+            steps {
+                sh '''
+                    aws ecr describe-repositories --repository-names $ECR_BACKEND_REPO --region $AWS_REGION >/dev/null 2>&1 \
+                        || aws ecr create-repository --repository-name $ECR_BACKEND_REPO --region $AWS_REGION
+                    aws ecr describe-repositories --repository-names $ECR_FRONTEND_REPO --region $AWS_REGION >/dev/null 2>&1 \
+                        || aws ecr create-repository --repository-name $ECR_FRONTEND_REPO --region $AWS_REGION
+                '''
+            }
+        }
+
+        stage('Login to ECR') {
+            steps {
+                sh 'aws ecr get-login-password --region $AWS_REGION | docker login --username AWS --password-stdin $REGISTRY'
+            }
+        }
+
+        stage('Build & push backend image') {
+            steps {
+                sh '''
+                    docker build -t $REGISTRY/$ECR_BACKEND_REPO:$IMAGE_TAG -t $REGISTRY/$ECR_BACKEND_REPO:latest ./backend
+                    docker push $REGISTRY/$ECR_BACKEND_REPO:$IMAGE_TAG
+                    docker push $REGISTRY/$ECR_BACKEND_REPO:latest
+                '''
+            }
+        }
+
+        stage('Build & push frontend image') {
+            steps {
+                sh '''
+                    docker build -t $REGISTRY/$ECR_FRONTEND_REPO:$IMAGE_TAG -t $REGISTRY/$ECR_FRONTEND_REPO:latest ./frontend
+                    docker push $REGISTRY/$ECR_FRONTEND_REPO:$IMAGE_TAG
+                    docker push $REGISTRY/$ECR_FRONTEND_REPO:latest
+                '''
+            }
+        }
+
+        stage('Connect kubectl to EKS') {
+            steps {
+                sh 'aws eks update-kubeconfig --name $CLUSTER_NAME --region $AWS_REGION'
+                sh 'kubectl get nodes'
+            }
+        }
+
+        stage('Deploy to EKS') {
+            steps {
+                sh '''
+                    kubectl -n $NAMESPACE set image deployment/backend  backend=$REGISTRY/$ECR_BACKEND_REPO:$IMAGE_TAG
+                    kubectl -n $NAMESPACE set image deployment/frontend frontend=$REGISTRY/$ECR_FRONTEND_REPO:$IMAGE_TAG
+                    kubectl -n $NAMESPACE rollout status deployment/backend  --timeout=180s
+                    kubectl -n $NAMESPACE rollout status deployment/frontend --timeout=180s
+                '''
+            }
+        }
+
+        stage('Seed database (first deploy only)') {
+            when { expression { return params.RUN_SEED } }
+            steps {
+                sh '''
+                    kubectl -n $NAMESPACE delete job sk-seed --ignore-not-found
+                    sed "s#image: sk-furniture-backend:latest#image: $REGISTRY/$ECR_BACKEND_REPO:$IMAGE_TAG#" k8s/04-seed-job.yaml | kubectl apply -f -
+                    kubectl -n $NAMESPACE wait --for=condition=complete job/sk-seed --timeout=120s
+                    kubectl -n $NAMESPACE logs job/sk-seed
+                '''
+            }
+        }
+
+        stage('Smoke test') {
+            steps {
+                sh '''
+                    kubectl -n $NAMESPACE run smoke-test-$BUILD_NUMBER --rm -i --restart=Never \
+                        --image=curlimages/curl -- curl -sf http://backend:5000/api/health
+                '''
+            }
+        }
+    }
+
+    post {
+        success {
+            echo "Deployed image tag ${env.IMAGE_TAG} to EKS cluster ${env.CLUSTER_NAME}."
+        }
+        failure {
+            echo "Pipeline failed. Check the stage logs above. You can roll back with:"
+            echo "  kubectl -n sk-furniture rollout undo deployment/backend"
+            echo "  kubectl -n sk-furniture rollout undo deployment/frontend"
+        }
+        always {
+            sh 'docker logout $REGISTRY || true'
+        }
+    }
+}

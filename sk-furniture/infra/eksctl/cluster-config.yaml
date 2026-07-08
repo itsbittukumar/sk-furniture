@@ -1,0 +1,41 @@
+# eksctl ClusterConfig - defines the full EKS cluster: VPC, managed node group,
+# IAM OIDC provider (needed for IRSA), and the core EKS addons.
+# Edit metadata.name / region / node sizing to taste, then run:
+#   eksctl create cluster -f infra/eksctl/cluster-config.yaml
+apiVersion: eksctl.io/v1alpha5
+kind: ClusterConfig
+
+metadata:
+  name: sk-furniture-cluster
+  region: ap-south-1
+  version: "1.29"
+  tags:
+    project: sk-furniture
+
+iam:
+  withOIDC: true   # required for IRSA (used below by the EBS CSI driver addon)
+
+managedNodeGroups:
+  - name: sk-ng-general
+    instanceType: t3.medium
+    desiredCapacity: 2
+    minSize: 2
+    maxSize: 6
+    volumeSize: 20
+    privateNetworking: true
+    labels:
+      role: general
+    tags:
+      project: sk-furniture
+    iam:
+      withAddonPolicies:
+        cloudWatch: true
+        autoScaler: true
+
+addons:
+  - name: vpc-cni
+  - name: coredns
+  - name: kube-proxy
+  - name: aws-ebs-csi-driver
+    wellKnownPolicies:
+      ebsCSIController: true   # lets eksctl create the IRSA role this addon needs

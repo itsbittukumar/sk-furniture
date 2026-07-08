@@ -1,0 +1,20 @@
+output "cluster_name" {
+  value = module.eks.cluster_name
+}
+
+output "cluster_endpoint" {
+  value = module.eks.cluster_endpoint
+}
+
+output "region" {
+  value = var.region
+}
+
+output "configure_kubectl" {
+  description = "Run this to point kubectl at the new cluster"
+  value       = "aws eks update-kubeconfig --name ${module.eks.cluster_name} --region ${var.region}"
+}
+
+output "ebs_csi_irsa_role_arn" {
+  value = module.ebs_csi_irsa_role.iam_role_arn
+}
