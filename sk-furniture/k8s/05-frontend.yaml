@@ -1,0 +1,39 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: frontend
+  namespace: sk-furniture
+spec:
+  replicas: 2
+  selector:
+    matchLabels: { app: frontend }
+  template:
+    metadata:
+      labels: { app: frontend }
+    spec:
+      containers:
+        - name: frontend
+          # Replace with your pushed image, e.g. <registry>/sk-furniture-frontend:1.0.0
+          image: sk-furniture-frontend:latest
+          ports:
+            - containerPort: 80
+          resources:
+            requests: { cpu: "50m", memory: "64Mi" }
+            limits: { cpu: "250m", memory: "256Mi" }
+          readinessProbe:
+            httpGet: { path: /, port: 80 }
+            initialDelaySeconds: 5
+          livenessProbe:
+            httpGet: { path: /, port: 80 }
+            initialDelaySeconds: 15
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: frontend
+  namespace: sk-furniture
+spec:
+  selector: { app: frontend }
+  ports:
+    - port: 80
+      targetPort: 80

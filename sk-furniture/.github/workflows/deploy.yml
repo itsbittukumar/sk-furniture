@@ -1,0 +1,85 @@
+name: Build and Deploy SK Furniture
+
+# Runs on every push to main. Builds both Docker images, pushes them to ECR
+# tagged with the commit SHA, then rolls out that exact tag to EKS.
+on:
+  push:
+    branches: [main]
+  workflow_dispatch: {}   # lets you trigger it manually from the Actions tab too
+
+env:
+  AWS_REGION: ap-south-1
+  CLUSTER_NAME: sk-furniture-cluster
+  ECR_BACKEND_REPO: sk-furniture-backend
+  ECR_FRONTEND_REPO: sk-furniture-frontend
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+    outputs:
+      image_tag: ${{ steps.vars.outputs.image_tag }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set image tag
+        id: vars
+        run: echo "image_tag=${GITHUB_SHA::8}" >> "$GITHUB_OUTPUT"
+
+      # Recommended: use OIDC federation instead of long-lived access keys.
+      # See "Alternative: OIDC" note in README for the one-time IAM role setup.
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        id: ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Build and push backend image
+        run: |
+          IMAGE=${{ steps.ecr.outputs.registry }}/${{ env.ECR_BACKEND_REPO }}:${{ steps.vars.outputs.image_tag }}
+          docker build -t "$IMAGE" ./backend
+          docker push "$IMAGE"
+
+      - name: Build and push frontend image
+        run: |
+          IMAGE=${{ steps.ecr.outputs.registry }}/${{ env.ECR_FRONTEND_REPO }}:${{ steps.vars.outputs.image_tag }}
+          docker build -t "$IMAGE" ./frontend
+          docker push "$IMAGE"
+
+  deploy:
+    needs: build-and-push
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Update kubeconfig
+        run: aws eks update-kubeconfig --name "$CLUSTER_NAME" --region "$AWS_REGION"
+
+      - name: Get ECR registry
+        id: ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Roll out new images
+        run: |
+          TAG=${{ needs.build-and-push.outputs.image_tag }}
+          REGISTRY=${{ steps.ecr.outputs.registry }}
+          kubectl -n sk-furniture set image deployment/backend  backend=$REGISTRY/${{ env.ECR_BACKEND_REPO }}:$TAG
+          kubectl -n sk-furniture set image deployment/frontend frontend=$REGISTRY/${{ env.ECR_FRONTEND_REPO }}:$TAG
+          kubectl -n sk-furniture rollout status deployment/backend --timeout=120s
+          kubectl -n sk-furniture rollout status deployment/frontend --timeout=120s
+
+      - name: Smoke test
+        run: |
+          kubectl -n sk-furniture run smoke-test --rm -i --restart=Never --image=curlimages/curl -- \
+            curl -sf http://backend:5000/api/health

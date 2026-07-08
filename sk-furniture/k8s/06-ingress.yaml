@@ -1,0 +1,26 @@
+# Requires an ingress controller (e.g. ingress-nginx or the AWS Load Balancer
+# Controller for ALB). Replace host with your real domain, or delete the host
+# line to accept any hostname while testing.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: sk-furniture-ingress
+  namespace: sk-furniture
+  annotations:
+    nginx.ingress.class: "nginx"
+    # For AWS ALB Controller instead, use these annotations and remove ingressClassName below:
+    # alb.ingress.kubernetes.io/scheme: internet-facing
+    # alb.ingress.kubernetes.io/target-type: ip
+spec:
+  ingressClassName: nginx
+  rules:
+    - host: skfurniture.example.com
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: frontend
+                port:
+                  number: 80

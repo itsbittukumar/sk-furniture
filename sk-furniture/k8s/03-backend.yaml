@@ -1,0 +1,42 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: backend
+  namespace: sk-furniture
+spec:
+  replicas: 2
+  selector:
+    matchLabels: { app: backend }
+  template:
+    metadata:
+      labels: { app: backend }
+    spec:
+      containers:
+        - name: backend
+          # Replace with your pushed image, e.g. <registry>/sk-furniture-backend:1.0.0
+          image: sk-furniture-backend:latest
+          ports:
+            - containerPort: 5000
+          envFrom:
+            - secretRef:
+                name: sk-backend-secret
+          resources:
+            requests: { cpu: "100m", memory: "128Mi" }
+            limits: { cpu: "500m", memory: "512Mi" }
+          readinessProbe:
+            httpGet: { path: /api/health, port: 5000 }
+            initialDelaySeconds: 5
+          livenessProbe:
+            httpGet: { path: /api/health, port: 5000 }
+            initialDelaySeconds: 15
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: backend
+  namespace: sk-furniture
+spec:
+  selector: { app: backend }
+  ports:
+    - port: 5000
+      targetPort: 5000

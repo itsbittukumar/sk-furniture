@@ -1,0 +1,19 @@
+# Run once after the backend image is deployed to create the admin account and
+# seed the starter catalog: kubectl apply -f k8s/04-seed-job.yaml
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: sk-seed
+  namespace: sk-furniture
+spec:
+  backoffLimit: 2
+  template:
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: seed
+          image: sk-furniture-backend:latest
+          command: ["node", "src/seed.js"]
+          envFrom:
+            - secretRef:
+                name: sk-backend-secret
